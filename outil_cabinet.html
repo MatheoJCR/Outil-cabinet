@@ -1,0 +1,1398 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Le classeur — Cabinet</title>
+  <link rel="icon" href="data:,">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <style>
+    html, body { margin:0; padding:0; }
+    #root { min-height:100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBhIBEMRoaSD8L0bCdfIoda9hy4Y-v_f0w",
+      authDomain: "outil-cabinet.firebaseapp.com",
+      projectId: "outil-cabinet",
+      storageBucket: "outil-cabinet.firebasestorage.app",
+      messagingSenderId: "689542938270",
+      appId: "1:689542938270:web:12e536829a361a5fbd058f",
+      measurementId: "G-4DQYCLSYPR",
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const CHUNK_SIZE = 900000; // marge de sécurité sous la limite de 1 Mo par document Firestore
+
+    async function saveShared(key, payload) {
+      const str = JSON.stringify(payload);
+      const parts = [];
+      for (let i = 0; i < str.length; i += CHUNK_SIZE) parts.push(str.slice(i, i + CHUNK_SIZE));
+      const batch = db.batch();
+      batch.set(db.collection('classeur_meta').doc(key), { chunks: parts.length, updatedAt: Date.now() });
+      parts.forEach((p, i) => {
+        batch.set(db.collection('classeur_chunks').doc(key + '__' + i), { v: p });
+      });
+      await batch.commit();
+    }
+    async function loadShared(key) {
+      try {
+        const metaSnap = await db.collection('classeur_meta').doc(key).get();
+        if (!metaSnap.exists) return null;
+        const n = metaSnap.data().chunks || 0;
+        if (n === 0) return null;
+        const snaps = await Promise.all(
+          Array.from({ length: n }, (_, i) => db.collection('classeur_chunks').doc(key + '__' + i).get())
+        );
+        const str = snaps.map((s) => (s.exists ? s.data().v : '')).join('');
+        return str ? JSON.parse(str) : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function makeIcon(children) {
+      return function IconCmp({ size = 20, color = 'currentColor', className = '', style = {}, fill, strokeWidth = 2 }) {
+        return (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill={fill !== undefined ? fill : 'none'}
+               stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"
+               className={className} style={style}>
+            {children}
+          </svg>
+        );
+      };
+    }
+    const Landmark = makeIcon(<>
+      <polygon points="3,10 12,4 21,10" />
+      <line x1="4" y1="10" x2="4" y2="20" /><line x1="9" y1="10" x2="9" y2="20" />
+      <line x1="15" y1="10" x2="15" y2="20" /><line x1="20" y1="10" x2="20" y2="20" />
+      <line x1="2" y1="21" x2="22" y2="21" />
+    </>);
+    const TrendingUp = makeIcon(<>
+      <polyline points="3,17 9,11 13,15 21,7" />
+      <polyline points="15,7 21,7 21,13" />
+    </>);
+    const Scale = makeIcon(<>
+      <line x1="12" y1="3" x2="12" y2="21" /><line x1="5" y1="7" x2="19" y2="7" />
+      <path d="M5 7l-3 7a3 3 0 0 0 6 0z" /><path d="M19 7l-3 7a3 3 0 0 0 6 0z" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+    </>);
+    const Users = makeIcon(<>
+      <circle cx="9" cy="8" r="3" /><path d="M3 20c0-3.5 2.7-6 6-6s6 2.5 6 6" />
+      <circle cx="17" cy="9" r="2.5" /><path d="M15.5 14c2.7 0 5 2 5.3 5" />
+    </>);
+    const Activity = makeIcon(<polyline points="3,12 8,12 10,6 14,18 16,12 21,12" />);
+    const Upload = makeIcon(<>
+      <path d="M12 16V4" /><polyline points="7,9 12,4 17,9" />
+      <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+    </>);
+    const FileSpreadsheet = makeIcon(<>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14,2 14,8 20,8" />
+      <line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" />
+      <line x1="11" y1="13" x2="11" y2="21" />
+    </>);
+    const RefreshCw = makeIcon(<>
+      <polyline points="23,4 23,10 17,10" /><polyline points="1,20 1,14 7,14" />
+      <path d="M3.5 9a9 9 0 0 1 15-3.5L23 10" /><path d="M20.5 15a9 9 0 0 1-15 3.5L1 14" />
+    </>);
+    const CalendarDays = makeIcon(<>
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+      <line x1="8" y1="14" x2="8" y2="14" /><line x1="12" y1="14" x2="12" y2="14" /><line x1="16" y1="14" x2="16" y2="14" />
+    </>);
+    const User = makeIcon(<>
+      <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+    </>);
+    const AlertCircle = makeIcon(<>
+      <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12" y2="16" />
+    </>);
+    const Loader2 = makeIcon(<path d="M21 12a9 9 0 1 1-6.2-8.5" />);
+    const Star = makeIcon(<polygon points="12,2 15,9 22,9.5 16.5,14 18,21 12,17 6,21 7.5,14 2,9.5 9,9" />);
+
+
+// ---------- Palette Corre Finance ----------
+const NAVY = '#153B6B';
+const NAVY_DEEP = '#0D2645';
+const GOLD = '#A67C2D';
+const GOLD_LIGHT = '#C89A4A';
+const BEIGE = '#F4F0E6';
+const PAPER = '#FFFFFF';
+const INK = '#1E2A3A';
+const INK_SOFT = '#56606E';
+const LINE = '#E3E7EE';
+const GREEN = '#3E7A52';
+const RED = '#B14A3A';
+const TEAL = '#3F6E75';
+const CHART_COLORS = [NAVY, GOLD, TEAL, '#7C8CA6', '#8E6F9E'];
+const SRI_COLORS = ['#3E7A52', '#6E9A56', '#A6B84A', '#D4B23C', '#D98A3C', '#C96B3C', '#B14A3A'];
+
+// ---------- Helpers génériques ----------
+function clean(x) {
+  if (x === undefined || x === null) return '';
+  if (typeof x === 'string' && x.trim().startsWith('#')) return '';
+  return x;
+}
+function v(ws, colLetter, row) {
+  if (!ws) return '';
+  const c = ws[colLetter + row];
+  return c ? clean(c.v) : '';
+}
+function num(x) {
+  const c = clean(x);
+  if (c === '' || c === null || c === undefined) return NaN;
+  return Number(c);
+}
+function fmtPct(x) {
+  const n = num(x);
+  if (isNaN(n)) return '—';
+  const pct = n * 100;
+  const s = pct.toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `${pct > 0 ? '+' : ''}${s} %`;
+}
+function fmtEur(x) {
+  const n = num(x);
+  if (isNaN(n)) return '—';
+  return `${n.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} €`;
+}
+function fmtNum(x, d = 2) {
+  const n = num(x);
+  if (isNaN(n)) return '—';
+  return n.toLocaleString('fr-FR', { maximumFractionDigits: d });
+}
+function isPercentHeader(col) {
+  return /%|perf|rendement|variation|évolution|evolution|var\./i.test(col);
+}
+function isCurrencyHeader(col) {
+  return /€|eur|montant|capital|patrimoine|encours/i.test(col) && !isPercentHeader(col);
+}
+function fmtPoids(x) {
+  const n = num(x);
+  if (isNaN(n)) return '—';
+  return `${(n * 100).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`;
+}
+// ---------- Atomes UI ----------
+function Stars({ n }) {
+  const val = Number(n) || 0;
+  return (
+    <span style={{ display: 'inline-flex', gap: 1 }}>
+      {[1, 2, 3, 4, 5].map((i) => (
+        <Star key={i} size={12} fill={i <= val ? GOLD : 'none'} color={i <= val ? GOLD : LINE} strokeWidth={1.5} />
+      ))}
+    </span>
+  );
+}
+function SriBadge({ level }) {
+  const n = Number(level);
+  if (!n) return <span>—</span>;
+  const color = SRI_COLORS[Math.min(Math.max(n, 1), 7) - 1];
+  return (
+    <span className="cb-sri" style={{ background: color }}>{n}</span>
+  );
+}
+function pillTone(text) {
+  const t = String(text || '').toLowerCase();
+  if (/tendu|baisse|risque|surchauffe/.test(t)) return 'warn';
+  if (/attractif|décote|decote|solide|rebond|fort|hausse|surprise/.test(t)) return 'pos';
+  return 'neu';
+}
+function Pill({ text }) {
+  if (!text) return <span>—</span>;
+  return <span className={`cb-pill-tag cb-pill-${pillTone(text)}`}>{text}</span>;
+}
+function PctCell({ x }) {
+  const n = num(x);
+  if (isNaN(n)) return <span className="cb-muted">—</span>;
+  return <span className={n >= 0 ? 'cb-pos' : 'cb-neg'}>{fmtPct(x)}</span>;
+}
+function Section({ eyebrow, title, children }) {
+  return (
+    <div className="cb-section">
+      <div className="cb-section-head">
+        {eyebrow && <p className="cb-eyebrow2">{eyebrow}</p>}
+        <h3>{title}</h3>
+      </div>
+      {children}
+    </div>
+  );
+}
+function KpiTile({ value, label, sub }) {
+  return (
+    <div className="cb-kpi">
+      <div className="cb-kpi-value">{value || '—'}</div>
+      <div className="cb-kpi-label">{label}</div>
+      {sub && <div className="cb-kpi-sub">{sub}</div>}
+    </div>
+  );
+}
+const HEAT_RED = [224, 138, 125];
+const HEAT_YELLOW = [242, 213, 126];
+const HEAT_GREEN = [143, 199, 154];
+function heatColor(ratio) {
+  const t = Math.max(0, Math.min(1, ratio));
+  let c;
+  if (t < 0.5) {
+    const s = t / 0.5;
+    c = HEAT_RED.map((v, i) => Math.round(v + (HEAT_YELLOW[i] - v) * s));
+  } else {
+    const s = (t - 0.5) / 0.5;
+    c = HEAT_YELLOW.map((v, i) => Math.round(v + (HEAT_GREEN[i] - v) * s));
+  }
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+function HeatCell({ value, ratio }) {
+  const n = num(value);
+  if (isNaN(n)) return <td className="cb-heat-empty">—</td>;
+  const bg = heatColor(ratio);
+  const decimals = Number.isInteger(n) ? 0 : 3;
+  return <td className="cb-heat" style={{ background: bg, color: INK }}>{fmtNum(n, decimals)}</td>;
+}
+
+// ============================================================
+// EXTRACTION — Performances (feuille "Performances", export Quantalys)
+// ============================================================
+const PERF_COLUMNS = [
+  { key: 'Fonds', label: 'Fonds', type: 'text' },
+  { key: 'Code ISIN', label: 'ISIN', type: 'isin' },
+  { key: 'Société de gestion', label: 'Société', type: 'text' },
+  { key: 'Notation', label: 'Note', type: 'stars' },
+  { key: 'SRI', label: 'SRI', type: 'sri' },
+  { key: 'VL', label: 'VL', type: 'num2' },
+  { key: 'Perf 4 sem.', label: '4 sem.', type: 'pct' },
+  { key: 'Perf 3 mois', label: '3 mois', type: 'pct' },
+  { key: 'Perf 6 mois', label: '6 mois', type: 'pct' },
+  { key: 'Perf YTD', label: 'YTD', type: 'pct' },
+  { key: 'Perf 1 an', label: '1 an', type: 'pct' },
+  { key: 'Perf 3 ans', label: '3 ans', type: 'pct' },
+  { key: 'Perf 5 ans', label: '5 ans', type: 'pct' },
+  { key: 'Frais courants', label: 'Frais', type: 'pct' },
+];
+function extractPerformances(wb) {
+  const sheetName = wb.SheetNames.find((n) => /perfor/i.test(n)) || wb.SheetNames[0];
+  const ws = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+  const groups = [];
+  let current = null;
+  rows.forEach((r) => {
+    const hasIsin = String(r['Code ISIN'] || '').trim() !== '';
+    if (!hasIsin && r['Fonds']) {
+      current = { category: r['Fonds'], funds: [] };
+      groups.push(current);
+    } else if (hasIsin) {
+      if (!current) { current = { category: '', funds: [] }; groups.push(current); }
+      current.funds.push(r);
+    }
+  });
+  return { groups };
+}
+function PerfCell({ col, row }) {
+  const raw = row[col.key];
+  switch (col.type) {
+    case 'stars': return <Stars n={raw} />;
+    case 'sri': return <SriBadge level={raw} />;
+    case 'pct': return <PctCell x={raw} />;
+    case 'num2': return <span className="cb-num-inline">{fmtNum(raw, 2)}</span>;
+    case 'isin': return <span className="cb-isin">{raw}</span>;
+    default: return <span>{raw || '—'}</span>;
+  }
+}
+function PerformancesView({ data }) {
+  const groups = (data && data.groups) || [];
+  if (!groups.length) return <p className="cb-muted">Aucune ligne de fonds trouvée dans la feuille "Performances".</p>;
+  return (
+    <div className="cb-table-wrap">
+      <table className="cb-table cb-table-perf">
+        <thead>
+          <tr>{PERF_COLUMNS.map((c) => (<th key={c.key} className={c.type === 'pct' || c.type === 'num2' ? 'cb-th-num' : ''}>{c.label}</th>))}</tr>
+        </thead>
+        <tbody>
+          {groups.map((g, gi) => (
+            <React.Fragment key={gi}>
+              {g.category && (
+                <tr className="cb-group-row"><td colSpan={PERF_COLUMNS.length}>{g.category}</td></tr>
+              )}
+              {g.funds.map((f, fi) => (
+                <tr key={fi}>
+                  {PERF_COLUMNS.map((c) => (
+                    <td key={c.key} className={c.type === 'pct' || c.type === 'num2' ? 'cb-num' : ''}>
+                      <PerfCell col={c} row={f} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ============================================================
+// EXTRACTION — Comparaison de fonds (Comparaison_type.xlsx)
+// ============================================================
+const FUND_COLS = ['B', 'C', 'D', 'E', 'F'];
+function labelIndex(ws, maxRow) {
+  const rows = [];
+  for (let r = 1; r <= maxRow; r++) {
+    const lab = v(ws, 'A', r);
+    if (lab) rows.push({ row: r, label: String(lab) });
+  }
+  return rows;
+}
+function findLabelRow(idx, re) {
+  const f = idx.find((x) => re.test(x.label));
+  return f ? f.row : null;
+}
+function findFundHeaderRow(ws, beforeRow) {
+  let best = { row: 2, count: 0 };
+  for (let r = 1; r < beforeRow; r++) {
+    const count = FUND_COLS.filter((c) => v(ws, c, r) !== '').length;
+    if (count > best.count) best = { row: r, count };
+  }
+  return best.row;
+}
+function extractComparaison(wb) {
+  const wsCard = wb.Sheets['Comparaison OPCVM'] || wb.Sheets[wb.SheetNames[0]];
+  const idx = labelIndex(wsCard, 40);
+
+  const pays = [1, 2, 3, 4, 5].map((n) => findLabelRow(idx, new RegExp(`^${n}(er|e)\\s*pays`, 'i')));
+  const secteurs = [1, 2, 3, 4, 5].map((n) => findLabelRow(idx, new RegExp(`^${n}(er|e)\\s*secteur`, 'i')));
+  const isinRow = findLabelRow(idx, /isin/i);
+  const biaisRow = findLabelRow(idx, /Biais g[ée]ographique/i);
+  const particularitesRow = findLabelRow(idx, /Particularit/i);
+  const concentrationRow = findLabelRow(idx, /^Concentration/i);
+  const positionRows = idx.filter((x) => /^Position\s*\d+/i.test(x.label)).map((x) => x.row);
+
+  const anchorRow = pays[0] || isinRow || 6;
+  const headerRow = findFundHeaderRow(wsCard, anchorRow);
+  const fundCols = FUND_COLS.filter((c) => v(wsCard, c, headerRow) !== '');
+
+  const funds = fundCols.map((c) => ({
+    name: v(wsCard, c, headerRow),
+    isin: isinRow ? v(wsCard, c, isinRow) : '',
+    geo: pays.map((r) => (r ? v(wsCard, c, r) : '')).filter(Boolean),
+    biaisGeo: biaisRow ? v(wsCard, c, biaisRow) : '',
+    sect: secteurs.map((r) => (r ? v(wsCard, c, r) : '')).filter(Boolean),
+    particularites: particularitesRow ? v(wsCard, c, particularitesRow) : '',
+    positions: positionRows.map((r) => v(wsCard, c, r)).filter(Boolean),
+    concentration: concentrationRow ? v(wsCard, c, concentrationRow) : '',
+  }));
+
+  const wsMat = wb.Sheets['Matrices corrélations'];
+  const matrices = [];
+  const synth = [];
+  if (wsMat) {
+    const matIdx = labelIndex(wsMat, 60);
+    const blockDefs = [
+      { title: 'Corrélation géographique', re: /CORR[EÉ]LATION G[EÉ]OGRAPHIQUE/i },
+      { title: 'Corrélation sectorielle', re: /CORR[EÉ]LATION SECTORIELLE/i },
+      { title: 'Chevauchement des positions', re: /CHEVAUCHEMENT/i },
+      { title: 'Score composite', re: /SCORE COMPOSITE DE CORR/i },
+    ];
+    blockDefs.forEach((b) => {
+      const titleRow = findLabelRow(matIdx, b.re);
+      if (!titleRow) return;
+      const headerRowM = titleRow + 1;
+      const cols = FUND_COLS.filter((c) => v(wsMat, c, headerRowM) !== '');
+      const rows = [];
+      for (let i = 0; i < cols.length; i++) {
+        const r = headerRowM + 1 + i;
+        rows.push({ label: v(wsMat, 'A', r), values: cols.map((c) => v(wsMat, c, r)) });
+      }
+      if (cols.length || rows.length) matrices.push({ title: b.title, cols: cols.map((c) => v(wsMat, c, headerRowM)), rows });
+    });
+    const synthRow = findLabelRow(matIdx, /SYNTH[EÈ]SE/i);
+    if (synthRow) {
+      let r = synthRow + 1;
+      while (v(wsMat, 'A', r) !== '' && !/L[EÉ]GENDE/i.test(v(wsMat, 'A', r)) && r < synthRow + 25) {
+        synth.push({ label: v(wsMat, 'A', r), value: v(wsMat, 'B', r) });
+        r++;
+      }
+    }
+  }
+
+  return { funds, matrices, synth };
+}
+const COMPARE_SECTION_COLORS = {
+  geo: 'rgba(21,59,107,0.07)',
+  sect: 'rgba(166,124,45,0.09)',
+  part: 'rgba(63,110,117,0.08)',
+  pos: 'rgba(142,111,158,0.08)',
+};
+function ComparaisonView({ data }) {
+  const funds = (data && data.funds) || [];
+  const matrices = (data && data.matrices) || [];
+  const synth = (data && data.synth) || [];
+  const maxPositions = funds.reduce((m, f) => Math.max(m, f.positions.length), 0);
+  return (
+    <>
+      {funds.length > 0 && (
+        <Section eyebrow="Fiches fonds" title="Comparaison OPCVM — tous les fonds sur une même grille">
+          <div className="cb-table-wrap cb-compare-wrap">
+            <table className="cb-table cb-compare-table">
+              <thead>
+                <tr>
+                  <th className="cb-compare-corner"></th>
+                  {funds.map((f, i) => (
+                    <th key={i} style={{ borderTop: `3px solid ${CHART_COLORS[i % CHART_COLORS.length]}` }}>
+                      <div className="cb-compare-fund-name">{f.name || `Fonds ${i + 1}`}</div>
+                      {f.isin && <div className="cb-isin">{f.isin}</div>}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="cb-compare-band" style={{ background: COMPARE_SECTION_COLORS.geo }}>
+                  <td colSpan={funds.length + 1}>Répartition géographique</td>
+                </tr>
+                {[0, 1, 2, 3, 4].map((idx) => (
+                  <tr key={`geo-${idx}`}>
+                    <td className="cb-compare-label">{idx === 0 ? '1er pays' : `${idx + 1}e pays`}</td>
+                    {funds.map((f, i) => (<td key={i} className="cb-compare-note">{f.geo[idx] || '—'}</td>))}
+                  </tr>
+                ))}
+                <tr>
+                  <td className="cb-compare-label">Biais géographique</td>
+                  {funds.map((f, i) => (<td key={i} className="cb-compare-note">{f.biaisGeo || '—'}</td>))}
+                </tr>
+
+                <tr className="cb-compare-band" style={{ background: COMPARE_SECTION_COLORS.sect }}>
+                  <td colSpan={funds.length + 1}>Répartition sectorielle</td>
+                </tr>
+                {[0, 1, 2, 3, 4].map((idx) => (
+                  <tr key={`sect-${idx}`}>
+                    <td className="cb-compare-label">{idx === 0 ? '1er secteur' : `${idx + 1}e secteur`}</td>
+                    {funds.map((f, i) => (<td key={i} className="cb-compare-note">{f.sect[idx] || '—'}</td>))}
+                  </tr>
+                ))}
+
+                {funds.some((f) => f.particularites) && (
+                  <>
+                    <tr className="cb-compare-band" style={{ background: COMPARE_SECTION_COLORS.part }}>
+                      <td colSpan={funds.length + 1}>Particularités</td>
+                    </tr>
+                    <tr>
+                      <td className="cb-compare-label"></td>
+                      {funds.map((f, i) => (<td key={i} className="cb-compare-note">{f.particularites || '—'}</td>))}
+                    </tr>
+                  </>
+                )}
+
+                {maxPositions > 0 && (
+                  <>
+                    <tr className="cb-compare-band" style={{ background: COMPARE_SECTION_COLORS.pos }}>
+                      <td colSpan={funds.length + 1}>Principales positions</td>
+                    </tr>
+                    {Array.from({ length: maxPositions }).map((_, idx) => (
+                      <tr key={`pos-${idx}`}>
+                        <td className="cb-compare-label">Position {idx + 1}</td>
+                        {funds.map((f, i) => (<td key={i} className="cb-compare-note">{f.positions[idx] || '—'}</td>))}
+                      </tr>
+                    ))}
+                  </>
+                )}
+
+                <tr className="cb-total-row">
+                  <td>Concentration</td>
+                  {funds.map((f, i) => (<td key={i} className="cb-compare-note">{f.concentration || '—'}</td>))}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      )}
+      {matrices.filter((m) => m.rows.length > 0).length > 0 && (
+        <Section eyebrow="Diversification" title="Matrices de corrélation">
+          <div className="cb-matrix-grid">
+            {matrices.filter((m) => m.rows.length > 0).map((m, i) => {
+              const allVals = m.rows.flatMap((r) => r.values.map((x) => num(x)).filter((n) => !isNaN(n)));
+              const minVal = Math.min(...allVals);
+              const maxVal = Math.max(...allVals);
+              const span = maxVal - minVal || 1;
+              return (
+                <div key={i} className="cb-matrix-card">
+                  <p className="cb-fund-block-title">{m.title}</p>
+                  <table className="cb-table cb-heat-table">
+                    <thead><tr><th></th>{m.cols.map((c, j) => (<th key={j}>{c}</th>))}</tr></thead>
+                    <tbody>
+                      {m.rows.map((r, ri) => (
+                        <tr key={ri}>
+                          <td className="cb-heat-label">{r.label}</td>
+                          {r.values.map((val, vi) => {
+                            const n = num(val);
+                            const ratio = isNaN(n) ? 0 : (n - minVal) / span;
+                            return <HeatCell key={vi} value={val} ratio={ratio} />;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
+      {synth.length > 0 && (
+        <Section eyebrow="Diversification" title="Synthèse">
+          <div className="cb-callout">
+            {synth.map((s, i) => (<p key={i}><strong>{s.label} :</strong> {s.value}</p>))}
+          </div>
+        </Section>
+      )}
+      {funds.length === 0 && (
+        <p className="cb-muted">Aucune fiche fonds trouvée dans la feuille "Comparaison OPCVM".</p>
+      )}
+    </>
+  );
+}
+
+// ============================================================
+// EXTRACTION — Super Allocator (18 gérants x classes d'actifs)
+// ============================================================
+const ASSET_COLS = [
+  { group: 'Actions', label: 'Actions en général', intCol: 'E', posCol: 'F' },
+  { group: 'Actions', label: 'Mondiale', intCol: 'G', posCol: 'H' },
+  { group: 'Actions', label: 'US', intCol: 'I', posCol: 'J' },
+  { group: 'Actions', label: 'Europe', intCol: 'K', posCol: 'L' },
+  { group: 'Actions', label: 'Marchés émergents', intCol: 'M', posCol: 'N' },
+  { group: 'Actions', label: 'Japon', intCol: 'O', posCol: 'P' },
+  { group: 'Alternatifs', label: 'Alternatifs en général', intCol: 'Q', posCol: 'R' },
+  { group: 'Alternatifs', label: 'Immobilier', intCol: 'S', posCol: 'T' },
+  { group: 'Alternatifs', label: 'Matières premières (ex-Or)', intCol: 'U', posCol: 'V' },
+  { group: 'Alternatifs', label: 'Or', intCol: 'W', posCol: 'X' },
+  { group: 'Alternatifs', label: 'Hedge funds', intCol: 'Y', posCol: 'Z' },
+  { group: 'Alternatifs', label: 'Dette privée', intCol: 'AA', posCol: 'AB' },
+  { group: 'Alternatifs', label: 'Private equity', intCol: 'AC', posCol: 'AD' },
+  { group: 'Alternatifs', label: 'Infrastructure', intCol: 'AE', posCol: 'AF' },
+];
+function extractSuperAllocator(wb) {
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const titleCol = 'D';
+  const managers = [];
+  for (let r = 5; r <= 80; r++) {
+    const nom = v(ws, 'A', r);
+    const societe = v(ws, 'C', r);
+    if (!nom || !societe) break;
+    const prenom = v(ws, 'B', r);
+    const titre = v(ws, titleCol, r);
+    const allocations = ASSET_COLS.map((a) => ({
+      label: a.label, group: a.group,
+      position: v(ws, a.posCol, r),
+      intention: v(ws, a.intCol, r),
+    }));
+    managers.push({ nom, prenom, societe, titre, allocations });
+  }
+  const source = v(ws, 'A', 5 + managers.length + 1);
+  return { managers, source };
+}
+const INTENTION_LABELS = { SUR: 'Surpondérer', SP: 'Sous-pondérer', N: 'Neutre', 'RETIRÉ': 'Retiré' };
+function IntentionBadge({ code }) {
+  const c = String(code || '').trim().toUpperCase();
+  if (!c || c === 'N/A') return <span className="cb-muted">—</span>;
+  const cls = c === 'SUR' ? 'cb-intent-sur' : c === 'SP' ? 'cb-intent-sp' : c === 'RETIRÉ' ? 'cb-intent-retire' : 'cb-intent-n';
+  return <span className={`cb-intent-badge ${cls}`}>{INTENTION_LABELS[c] || c}</span>;
+}
+function tallyIntentions(codes) {
+  const t = { SUR: 0, SP: 0, N: 0 };
+  codes.forEach((c) => {
+    const key = String(c || '').trim().toUpperCase();
+    if (t[key] !== undefined) t[key] += 1;
+  });
+  return t;
+}
+function IntentionTally({ tally }) {
+  return (
+    <span className="cb-intent-tally">
+      <span className="cb-intent-tally-sur">Sur {tally.SUR}</span>
+      <span className="cb-intent-tally-sp">Sous {tally.SP}</span>
+      <span className="cb-intent-tally-n">N {tally.N}</span>
+    </span>
+  );
+}
+function SuperAllocatorView({ data }) {
+  const managers = (data && data.managers) || [];
+  const source = data && data.source;
+  if (!managers.length) return <p className="cb-muted">Aucun gérant trouvé dans le fichier.</p>;
+  const groups = [];
+  ASSET_COLS.forEach((a) => {
+    let g = groups.find((x) => x.group === a.group);
+    if (!g) { g = { group: a.group, cols: [] }; groups.push(g); }
+    g.cols.push(a);
+  });
+  const columnIntentionTotals = ASSET_COLS.map((_, j) => tallyIntentions(managers.map((m) => (m.allocations[j] || {}).intention)));
+  const grandIntentionTotal = tallyIntentions(managers.flatMap((m) => (m.allocations || []).map((a) => a.intention)));
+  return (
+    <Section eyebrow={`${managers.length} gérants`} title="Répartition des allocations">
+      <div className="cb-table-wrap cb-allocator-wrap">
+        <table className="cb-table cb-allocator-table">
+          <thead>
+            <tr>
+              <th rowSpan={2} className="cb-compare-corner">Gérant</th>
+              {groups.map((g) => (<th key={g.group} colSpan={g.cols.length} className="cb-allocator-group-head">{g.group}</th>))}
+              <th rowSpan={2} className="cb-compare-corner">Total</th>
+            </tr>
+            <tr>
+              {groups.flatMap((g) => g.cols.map((c) => (<th key={c.label}>{c.label}</th>)))}
+            </tr>
+          </thead>
+          <tbody>
+            {managers.map((m, i) => (
+              <tr key={i}>
+                <td className="cb-compare-label">
+                  <div className="cb-allocator-name">{m.societe}</div>
+                  <div className="cb-isin">{m.nom} {m.prenom}{m.titre ? ` — ${m.titre}` : ''}</div>
+                </td>
+                {m.allocations.map((a, j) => (
+                  <td key={j} className="cb-allocator-cell">
+                    <div className="cb-alloc-position">{a.position || '—'}</div>
+                    <IntentionBadge code={a.intention} />
+                  </td>
+                ))}
+                <td className="cb-allocator-total">
+                  <IntentionTally tally={tallyIntentions(m.allocations.map((a) => a.intention))} />
+                </td>
+              </tr>
+            ))}
+            <tr className="cb-total-row">
+              <td>Total</td>
+              {columnIntentionTotals.map((t, j) => (
+                <td key={j} className="cb-allocator-cell">
+                  <IntentionTally tally={t} />
+                </td>
+              ))}
+              <td className="cb-allocator-total">
+                <IntentionTally tally={grandIntentionTotal} />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {source && <p className="cb-muted" style={{ marginTop: 10 }}>{source}</p>}
+    </Section>
+  );
+}
+
+// ============================================================
+// EXTRACTION — Indicateurs de marchés (indices + matières premières)
+// ============================================================
+function excelDateStr(raw) {
+  if (raw === '' || raw === null || raw === undefined) return '';
+  if (typeof raw !== 'string') {
+    const n = Number(raw);
+    if (!isNaN(n)) {
+      const date = new Date(Math.round((n - 25569) * 86400 * 1000));
+      return date.toLocaleDateString('fr-FR');
+    }
+  }
+  return String(raw);
+}
+const INDICES_PERIOD_COLS = ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'M'];
+function extractIndicateursMarches(wb) {
+  const ws = wb.Sheets['Indicateurs'];
+  const wsCommo = wb.Sheets['Matières premières'];
+  const updatedAt = ws ? excelDateStr(v(ws, 'C', 1)) : '';
+  const periodMeta = ws ? INDICES_PERIOD_COLS.map((c) => {
+    const label = v(ws, c, 3);
+    const type = c === 'D' ? 'raw' : /niveau/i.test(label) ? 'num' : 'pct';
+    return { col: c, label, type };
+  }) : [];
+  const rows = [];
+  if (ws) {
+    let currentZone = '';
+    let blankStreak = 0;
+    for (let r = 4; r <= 300; r++) {
+      const indice = v(ws, 'B', r);
+      const zone = v(ws, 'A', r);
+      if (!indice) {
+        blankStreak += 1;
+        if (rows.length > 0 && blankStreak > 6) break;
+        continue;
+      }
+      blankStreak = 0;
+      if (zone) currentZone = zone;
+      rows.push({ zone: currentZone, indice, values: INDICES_PERIOD_COLS.map((c) => v(ws, c, r)) });
+    }
+  }
+  const commodities = [];
+  if (wsCommo) {
+    for (let r = 2; r <= 60; r++) {
+      const desc = v(wsCommo, 'A', r);
+      if (!desc) break;
+      commodities.push({
+        desc,
+        secteurs: v(wsCommo, 'B', r),
+        zone: v(wsCommo, 'C', r),
+        offre: v(wsCommo, 'D', r),
+        actu: v(wsCommo, 'E', r),
+      });
+    }
+  }
+  return { updatedAt, periodMeta, rows, commodities };
+}
+function CommodityCard({ c }) {
+  const parts = String(c.desc || '').split('. ');
+  const headline = parts[0];
+  const body = parts.slice(1).join('. ');
+  return (
+    <div className="cb-region-card">
+      <div className="cb-region-head"><span className="cb-region-zone">{headline}.</span></div>
+      {body && <p className="cb-fund-note" style={{ marginBottom: 12 }}>{body}</p>}
+      {c.secteurs && (
+        <div className="cb-fund-block" style={{ padding: 0, marginBottom: 10 }}>
+          <p className="cb-fund-block-title">Secteurs touchés</p>
+          <p className="cb-fund-note" style={{ whiteSpace: 'pre-line' }}>{c.secteurs}</p>
+        </div>
+      )}
+      {c.zone && (
+        <div className="cb-fund-block" style={{ padding: 0, marginBottom: 10 }}>
+          <p className="cb-fund-block-title">Zone géographique</p>
+          <p className="cb-fund-note" style={{ whiteSpace: 'pre-line' }}>{c.zone}</p>
+        </div>
+      )}
+      {c.offre && (
+        <div className="cb-fund-block" style={{ padding: 0 }}>
+          <p className="cb-fund-block-title">Offre / Demande</p>
+          <p className="cb-fund-note">{c.offre}</p>
+        </div>
+      )}
+      {c.actu && <div className="cb-callout" style={{ marginTop: 12 }}><p>{c.actu}</p></div>}
+    </div>
+  );
+}
+function IndicateursMarchesView({ data }) {
+  const rows = (data && data.rows) || [];
+  const periodMeta = (data && data.periodMeta) || [];
+  const commodities = (data && data.commodities) || [];
+  const updatedAt = data && data.updatedAt;
+  const hasIndices = rows.length > 0;
+  const hasCommo = commodities.length > 0;
+  const [activeSheet, setActiveSheet] = useState(() => (hasIndices ? 'indices' : 'commo'));
+  if (!hasIndices && !hasCommo) return <p className="cb-muted">Aucune donnée exploitable trouvée dans ce fichier.</p>;
+  let lastZone = null;
+  return (
+    <>
+      {hasIndices && hasCommo && (
+        <div className="cb-sheet-pills">
+          <button className={`cb-pill ${activeSheet === 'indices' ? 'active' : ''}`} onClick={() => setActiveSheet('indices')}>Indices</button>
+          <button className={`cb-pill ${activeSheet === 'commo' ? 'active' : ''}`} onClick={() => setActiveSheet('commo')}>Matières premières</button>
+        </div>
+      )}
+      {activeSheet === 'indices' && hasIndices && (
+        <>
+          {updatedAt && <p className="cb-muted" style={{ marginBottom: 14 }}>Mis à jour le {updatedAt}</p>}
+          <div className="cb-table-wrap">
+            <table className="cb-table">
+              <thead>
+                <tr>
+                  <th>Indice</th>
+                  {periodMeta.map((m) => (<th key={m.col} className="cb-th-num">{m.label}</th>))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => {
+                  const zoneChanged = row.zone !== lastZone;
+                  lastZone = row.zone;
+                  return (
+                    <React.Fragment key={i}>
+                      {zoneChanged && row.zone && (
+                        <tr className="cb-group-row"><td colSpan={periodMeta.length + 1}>{row.zone}</td></tr>
+                      )}
+                      <tr>
+                        <td>{row.indice}</td>
+                        {row.values.map((val, j) => {
+                          const meta = periodMeta[j];
+                          if (!meta) return <td key={j}>—</td>;
+                          if (meta.type === 'pct') return <td key={j} className="cb-num"><PctCell x={val} /></td>;
+                          if (meta.type === 'num') return <td key={j} className="cb-num">{fmtNum(val, 0)}</td>;
+                          return <td key={j} className="cb-num">{val || '—'}</td>;
+                        })}
+                      </tr>
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {activeSheet === 'commo' && hasCommo && (
+        <div className="cb-commodity-list">
+          {commodities.map((c, i) => (<CommodityCard key={i} c={c} />))}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ============================================================
+// Workspace shell (upload / stockage partagé / états)
+// ============================================================
+function Workspace({ storageKey, title, subtitle, hint, Icon, extractFn, RenderComponent }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState(null);
+  const [uploaderName, setUploaderName] = useState('');
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    loadShared(storageKey).then((res) => { if (mounted) { setData(res); setLoading(false); } });
+    return () => { mounted = false; };
+  }, [storageKey]);
+
+  // Synchronisation entre navigateurs : on revérifie périodiquement le stockage partagé
+  // pour que la mise à jour d'un conseiller apparaisse chez les autres sans rechargement manuel.
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const res = await loadShared(storageKey);
+      setData((prev) => {
+        if (!res) return prev;
+        if (!prev || res.uploadedAt !== prev.uploadedAt) return res;
+        return prev;
+      });
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [storageKey]);
+
+  const handleFile = useCallback((e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const wb = XLSX.read(evt.target.result, { type: 'array' });
+        const extracted = extractFn(wb);
+        const payload = {
+          extracted, fileName: file.name,
+          uploadedBy: uploaderName.trim() || 'Non renseigné',
+          uploadedAt: new Date().toISOString(),
+        };
+        await saveShared(storageKey, payload);
+        setData(payload);
+      } catch (err) {
+        setError("Impossible de lire ce fichier. Vérifiez qu'il correspond bien au modèle attendu pour cet onglet.");
+      } finally {
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    };
+    reader.onerror = () => { setError('La lecture du fichier a échoué.'); setUploading(false); };
+    reader.readAsArrayBuffer(file);
+  }, [storageKey, uploaderName, extractFn]);
+
+  return (
+    <div>
+      <div className="cb-workspace-header">
+        <div className="cb-workspace-title">
+          <Icon size={22} color={NAVY} />
+          <div>
+            <h2>{title}</h2>
+            <p>{subtitle}</p>
+          </div>
+        </div>
+        <div className="cb-upload-zone">
+          <input type="text" placeholder="Votre nom (optionnel)" value={uploaderName} onChange={(e) => setUploaderName(e.target.value)} className="cb-name-input" />
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: 'none' }} id={`file-${storageKey}`} />
+          <label htmlFor={`file-${storageKey}`} className="cb-upload-btn">
+            {uploading ? <Loader2 size={16} className="cb-spin" /> : (data ? <RefreshCw size={16} /> : <Upload size={16} />)}
+            {data ? 'Remplacer le fichier' : 'Importer un fichier Excel'}
+          </label>
+        </div>
+      </div>
+
+      {error && <div className="cb-error"><AlertCircle size={16} /> {error}</div>}
+
+      {loading ? (
+        <div className="cb-loading"><Loader2 size={20} className="cb-spin" /> Chargement…</div>
+      ) : !data ? (
+        <div className="cb-empty">
+          <FileSpreadsheet size={40} color={INK_SOFT} />
+          <p>Aucune donnée pour l'instant.</p>
+          <p className="cb-empty-sub">{hint}</p>
+        </div>
+      ) : (
+        <>
+          <div className="cb-meta">
+            <span><User size={13} /> {data.uploadedBy}</span>
+            <span><CalendarDays size={13} /> {new Date(data.uploadedAt).toLocaleString('fr-FR')}</span>
+            <span><FileSpreadsheet size={13} /> {data.fileName}</span>
+          </div>
+          <RenderComponent data={data.extracted} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ImageWorkspace({ storageKey, title, subtitle, hint, Icon }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState(null);
+  const [uploaderName, setUploaderName] = useState('');
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    loadShared(storageKey).then((res) => { if (mounted) { setData(res); setLoading(false); } });
+    return () => { mounted = false; };
+  }, [storageKey]);
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const res = await loadShared(storageKey);
+      setData((prev) => {
+        if (!res) return prev;
+        if (!prev || res.uploadedAt !== prev.uploadedAt) return res;
+        return prev;
+      });
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [storageKey]);
+
+  const handleFiles = useCallback((e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setError(null);
+    setUploading(true);
+    Promise.all(files.map((file) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({ name: file.name, dataUrl: reader.result });
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    }))).then(async (images) => {
+      const payload = {
+        images,
+        uploadedBy: uploaderName.trim() || 'Non renseigné',
+        uploadedAt: new Date().toISOString(),
+      };
+      try {
+        await saveShared(storageKey, payload);
+        setData(payload);
+      } catch (err) {
+        setError("L'enregistrement a échoué — les images sont peut-être trop lourdes au total (limite ~5 Mo). Essayez avec moins d'images ou une résolution plus légère.");
+      } finally {
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    }).catch(() => {
+      setError('La lecture des images a échoué.');
+      setUploading(false);
+    });
+  }, [storageKey, uploaderName]);
+
+  return (
+    <div>
+      <div className="cb-workspace-header">
+        <div className="cb-workspace-title">
+          <Icon size={22} color={NAVY} />
+          <div>
+            <h2>{title}</h2>
+            <p>{subtitle}</p>
+          </div>
+        </div>
+        <div className="cb-upload-zone">
+          <input type="text" placeholder="Votre nom (optionnel)" value={uploaderName} onChange={(e) => setUploaderName(e.target.value)} className="cb-name-input" />
+          <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleFiles} style={{ display: 'none' }} id={`file-${storageKey}`} />
+          <label htmlFor={`file-${storageKey}`} className="cb-upload-btn">
+            {uploading ? <Loader2 size={16} className="cb-spin" /> : (data ? <RefreshCw size={16} /> : <Upload size={16} />)}
+            {data ? 'Remplacer les images' : 'Importer les images du diaporama'}
+          </label>
+        </div>
+      </div>
+
+      {error && <div className="cb-error"><AlertCircle size={16} /> {error}</div>}
+
+      {loading ? (
+        <div className="cb-loading"><Loader2 size={20} className="cb-spin" /> Chargement…</div>
+      ) : !data || !data.images || !data.images.length ? (
+        <div className="cb-empty">
+          <FileSpreadsheet size={40} color={INK_SOFT} />
+          <p>Aucune donnée pour l'instant.</p>
+          <p className="cb-empty-sub">{hint}</p>
+        </div>
+      ) : (
+        <>
+          <div className="cb-meta">
+            <span><User size={13} /> {data.uploadedBy}</span>
+            <span><CalendarDays size={13} /> {new Date(data.uploadedAt).toLocaleString('fr-FR')}</span>
+            <span><FileSpreadsheet size={13} /> {data.images.length} image{data.images.length > 1 ? 's' : ''}</span>
+          </div>
+          <div className="cb-image-gallery">
+            {data.images.map((img, i) => (
+              <div key={i} className="cb-image-card">
+                <img src={img.dataUrl} alt={img.name} />
+                <p className="cb-image-caption">{img.name}</p>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PptxDropZone({ storageKey }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState(null);
+  const [uploaderName, setUploaderName] = useState('');
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    loadShared(storageKey).then((res) => { if (mounted) { setData(res); setLoading(false); } });
+    return () => { mounted = false; };
+  }, [storageKey]);
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const res = await loadShared(storageKey);
+      setData((prev) => {
+        if (!res) return prev;
+        if (!prev || res.uploadedAt !== prev.uploadedAt) return res;
+        return prev;
+      });
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [storageKey]);
+
+  const handleFile = useCallback((e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const payload = {
+        name: file.name, size: file.size, dataUrl: reader.result,
+        uploadedBy: uploaderName.trim() || 'Non renseigné',
+        uploadedAt: new Date().toISOString(),
+      };
+      try {
+        await saveShared(storageKey, payload);
+        setData(payload);
+      } catch (err) {
+        setError("L'enregistrement a échoué — le fichier est peut-être trop volumineux (limite ~5 Mo une fois encodé).");
+      } finally {
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    };
+    reader.onerror = () => { setError('La lecture du fichier a échoué.'); setUploading(false); };
+    reader.readAsDataURL(file);
+  }, [storageKey, uploaderName]);
+
+  return (
+    <div className="cb-pptx-box">
+      <div className="cb-pptx-box-head">
+        <div>
+          <p className="cb-fund-block-title" style={{ marginBottom: 4 }}>Fichier original (PowerPoint)</p>
+          {loading ? (
+            <p className="cb-muted" style={{ margin: 0 }}>Chargement…</p>
+          ) : data ? (
+            <a className="cb-pptx-download" href={data.dataUrl} download={data.name}>
+              <FileSpreadsheet size={16} /> {data.name}
+              <span className="cb-muted">({(data.size / 1024 / 1024).toFixed(1)} Mo)</span>
+            </a>
+          ) : (
+            <p className="cb-muted" style={{ margin: 0 }}>Aucun fichier déposé.</p>
+          )}
+        </div>
+        <div className="cb-upload-zone">
+          <input type="text" placeholder="Votre nom (optionnel)" value={uploaderName} onChange={(e) => setUploaderName(e.target.value)} className="cb-name-input" />
+          <input ref={fileInputRef} type="file" accept=".pptx,.ppt" onChange={handleFile} style={{ display: 'none' }} id={`file-${storageKey}`} />
+          <label htmlFor={`file-${storageKey}`} className="cb-upload-btn">
+            {uploading ? <Loader2 size={16} className="cb-spin" /> : (data ? <RefreshCw size={16} /> : <Upload size={16} />)}
+            {data ? 'Remplacer le fichier' : 'Déposer le PowerPoint'}
+          </label>
+        </div>
+      </div>
+      {error && <div className="cb-error" style={{ marginTop: 10, marginBottom: 0 }}><AlertCircle size={16} /> {error}</div>}
+      {data && (
+        <div className="cb-meta" style={{ marginTop: 10, marginBottom: 0 }}>
+          <span><User size={13} /> {data.uploadedBy}</span>
+          <span><CalendarDays size={13} /> {new Date(data.uploadedAt).toLocaleString('fr-FR')}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MacroTab() {
+  return (
+    <div>
+      <PptxDropZone storageKey="tab-data:macro:pptx" />
+      <p className="cb-macro-hint">
+        Le dépôt ci-dessus garde le fichier original téléchargeable, mais un navigateur ne peut pas afficher un
+        PowerPoint. Pour le <strong>visuel défilant ci-dessous</strong> : envoyez ce même pptx à Claude (avec le skill
+        de conversion), récupérez les images générées, puis glissez-les dans la zone "Importer les images".
+      </p>
+      <ImageWorkspace
+        storageKey="tab-data:macro:images"
+        title="Macro"
+        subtitle="Visuel du reporting marchés"
+        hint="Convertissez le pptx en images (via Claude) puis importez-les ici pour le visuel — le fichier brut se dépose juste au-dessus."
+        Icon={Landmark}
+      />
+    </div>
+  );
+}
+
+const SECTORS = [
+  { key: 'defense', label: 'Actions défense' },
+  { key: 'dividendes', label: 'Actions dividendes' },
+  { key: 'emergents', label: 'Fonds émergents' },
+  { key: 'europe', label: 'Fonds Europe' },
+  { key: 'monde', label: 'Fonds Monde' },
+  { key: 'sante', label: 'Fonds santé' },
+  { key: 'tech', label: 'Fonds tech' },
+];
+function ComparaisonSectorTab() {
+  const [activeSector, setActiveSector] = useState(SECTORS[0].key);
+  return (
+    <div>
+      <div className="cb-sector-select-row">
+        <label className="cb-sector-select-label">Secteur</label>
+        <select className="cb-sector-select" value={activeSector} onChange={(e) => setActiveSector(e.target.value)}>
+          {SECTORS.map((s) => (<option key={s.key} value={s.key}>{s.label}</option>))}
+        </select>
+      </div>
+      {SECTORS.map((s) => (
+        <div key={s.key} style={{ display: activeSector === s.key ? 'block' : 'none' }}>
+          <Workspace
+            storageKey={`tab-data:comparaison-v2:${s.key}`}
+            title={`Comparaison de fonds — ${s.label}`}
+            subtitle="Fiches OPCVM & corrélations"
+            hint="Importez le fichier de comparaison de ce secteur (feuilles Comparaison OPCVM / Matrices corrélations)."
+            Icon={Scale}
+            extractFn={extractComparaison}
+            RenderComponent={ComparaisonView}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================
+// App
+// ============================================================
+function App() {
+  const [activeTab, setActiveTab] = useState('macro');
+  const tabs = [
+    { key: 'macro', label: 'Macro', Icon: Landmark, subtitle: "Visuel du reporting marchés (pptx exporté en images)", hint: "Dans PowerPoint : Fichier > Exporter > Modifier le type de fichier > PNG, pour les diapos clés, puis importez-les ici." },
+    { key: 'super-allocator-v2', label: 'Super Allocator', Icon: Users, subtitle: 'Avis de marché — 18 gérants', hint: "Importez le fichier Super Allocator (avis des gérants).", extractFn: extractSuperAllocator, RenderComponent: SuperAllocatorView },
+    { key: 'indicateurs-marches', label: 'Indicateurs de marchés', Icon: Activity, subtitle: 'Niveaux des principaux indices mondiaux', hint: "Importez le fichier des indicateurs de marchés.", extractFn: extractIndicateursMarches, RenderComponent: IndicateursMarchesView },
+    { key: 'liste-uc', label: 'Liste UC Cabinet', Icon: TrendingUp, subtitle: 'Export Quantalys — toutes classes', hint: 'Importez l\'export de performances (feuille "Performances").', extractFn: extractPerformances, RenderComponent: PerformancesView },
+    { key: 'comparaison', label: 'Comparaison de fonds', Icon: Scale, subtitle: 'Fiches OPCVM & corrélations, par secteur', hint: '' },
+  ];
+
+  return (
+    <div className="cb-root">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap');
+
+        .cb-root { background:${BEIGE}; color:${INK}; font-family:'Inter',system-ui,sans-serif; font-variant-numeric:tabular-nums; min-height:100vh; padding:40px 24px 64px; box-sizing:border-box; -webkit-font-smoothing:antialiased; }
+        .cb-shell { max-width:1240px; margin:0 auto; }
+
+        .cb-header { display:flex; align-items:flex-end; justify-content:space-between; margin-bottom:28px; flex-wrap:wrap; gap:12px; }
+        .cb-eyebrow { text-transform:uppercase; letter-spacing:.14em; font-size:11px; color:${GOLD}; margin:0 0 8px; font-weight:600; }
+        .cb-header h1 { font-family:'Fraunces',serif; font-weight:500; font-size:clamp(26px,3.4vw,36px); color:${NAVY_DEEP}; margin:0; letter-spacing:-.01em; }
+
+        .cb-tabs { display:flex; gap:6px; padding-left:4px; flex-wrap:wrap; }
+        .cb-tab { display:flex; align-items:center; gap:8px; padding:11px 20px; background:${LINE}; border:1px solid ${LINE}; border-bottom:none; border-radius:10px 10px 0 0; color:${INK_SOFT}; font-family:'Inter'; font-size:13.5px; font-weight:500; cursor:pointer; position:relative; top:1px; transition:all .15s ease; }
+        .cb-tab:hover { color:${NAVY}; }
+        .cb-tab.active { background:${PAPER}; color:${NAVY_DEEP}; box-shadow:inset 0 2px 0 ${GOLD}; top:0; font-weight:600; }
+
+        .cb-panel { background:${PAPER}; border:1px solid ${LINE}; border-radius:0 14px 14px 14px; padding:28px 32px; }
+
+        .cb-workspace-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:20px; flex-wrap:wrap; }
+        .cb-workspace-title { display:flex; align-items:center; gap:12px; }
+        .cb-workspace-title h2 { font-family:'Fraunces',serif; font-size:20px; margin:0; font-weight:600; color:${NAVY_DEEP}; }
+        .cb-workspace-title p { margin:3px 0 0; font-size:13px; color:${INK_SOFT}; }
+
+        .cb-upload-zone { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+        .cb-name-input { background:${PAPER}; border:1px solid ${LINE}; color:${INK}; font-size:13px; padding:9px 12px; border-radius:8px; font-family:'Inter'; width:170px; }
+        .cb-name-input:focus { outline:2px solid ${GOLD_LIGHT}; outline-offset:1px; }
+        .cb-upload-btn { display:inline-flex; align-items:center; gap:8px; background:${NAVY}; color:#fff; font-size:13px; font-weight:600; padding:9px 16px; border-radius:8px; cursor:pointer; white-space:nowrap; transition:filter .15s; }
+        .cb-upload-btn:hover { filter:brightness(1.12); }
+
+        .cb-spin { animation:cb-spin 1s linear infinite; }
+        @keyframes cb-spin { to { transform:rotate(360deg); } }
+
+        .cb-error { display:flex; align-items:center; gap:8px; background:#FBEEEA; border:1px solid ${RED}; color:${RED}; padding:10px 14px; border-radius:8px; font-size:13px; margin-bottom:16px; }
+        .cb-loading, .cb-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:60px 20px; color:${INK_SOFT}; text-align:center; }
+        .cb-empty p { margin:0; } .cb-empty-sub { font-size:13px; max-width:420px; }
+
+        .cb-meta { display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:${INK_SOFT}; margin-bottom:22px; }
+        .cb-meta span { display:flex; align-items:center; gap:5px; }
+        .cb-muted { color:${INK_SOFT}; font-size:13px; }
+
+        .cb-section { margin-bottom:32px; }
+        .cb-section-head { margin-bottom:14px; border-left:3px solid ${GOLD}; padding-left:12px; }
+        .cb-eyebrow2 { text-transform:uppercase; letter-spacing:.12em; font-size:10.5px; color:${GOLD}; margin:0 0 3px; font-weight:600; }
+        .cb-section-head h3 { font-family:'Fraunces',serif; font-size:17px; margin:0; color:${NAVY_DEEP}; font-weight:600; }
+
+        .cb-kpi-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; }
+        .cb-kpi { background:${BEIGE}; border:1px solid ${LINE}; border-radius:10px; padding:14px 16px; }
+        .cb-kpi-value { font-family:'Fraunces',serif; font-size:26px; color:${NAVY_DEEP}; font-weight:600; line-height:1.1; }
+        .cb-kpi-label { font-size:12px; color:${INK_SOFT}; margin-top:4px; }
+        .cb-kpi-sub { font-size:11px; color:${INK_SOFT}; opacity:.8; margin-top:2px; }
+
+        .cb-region-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px; }
+        .cb-region-card { border:1px solid ${LINE}; border-radius:10px; padding:16px; background:${PAPER}; }
+        .cb-region-head { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:4px; }
+        .cb-region-zone { font-weight:600; color:${NAVY_DEEP}; font-size:14px; }
+        .cb-region-pib { font-family:'Fraunces',serif; font-weight:600; color:${GOLD}; font-size:16px; }
+        .cb-region-source { font-size:11px; color:${INK_SOFT}; margin:0 0 10px; font-style:italic; }
+        .cb-bullets { margin:0; padding-left:16px; font-size:12.5px; line-height:1.55; color:${INK}; }
+        .cb-bullets li { margin-bottom:5px; }
+
+        .cb-table-wrap { overflow:auto; max-height:520px; border:1px solid ${LINE}; border-radius:10px; }
+        .cb-table { width:100%; border-collapse:collapse; font-size:13px; }
+        .cb-table th { position:sticky; top:0; background:${BEIGE}; text-align:left; padding:10px 14px; font-weight:600; color:${INK_SOFT}; border-bottom:1px solid ${LINE}; white-space:nowrap; z-index:1; }
+        .cb-th-num { text-align:right; }
+        .cb-table td { padding:9px 14px; border-bottom:1px solid ${LINE}; color:${INK}; white-space:nowrap; }
+        .cb-table tr:last-child td { border-bottom:none; }
+        .cb-num, .cb-num-inline { text-align:right; font-variant-numeric:tabular-nums; }
+        .cb-pos { color:${GREEN}; font-weight:500; }
+        .cb-neg { color:${RED}; font-weight:500; }
+        .cb-isin { font-size:11px; color:${INK_SOFT}; letter-spacing:.02em; }
+        .cb-group-row td { background:${NAVY}; color:#fff; font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; padding:8px 14px; }
+        .cb-total-row td { background:${BEIGE}; font-weight:700; border-top:2px solid ${GOLD}; }
+
+        .cb-sri { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; border-radius:50%; color:#fff; font-size:11px; font-weight:700; }
+        .cb-pill-tag { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11.5px; font-weight:600; white-space:nowrap; }
+        .cb-pill-pos { background:#E9F2EC; color:${GREEN}; }
+        .cb-pill-neu { background:${LINE}; color:${NAVY_DEEP}; }
+        .cb-pill-warn { background:#FBEEEA; color:${RED}; }
+
+        .cb-fund-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:16px; }
+        .cb-fund-card { border:1px solid ${LINE}; border-radius:12px; overflow:hidden; background:${PAPER}; display:flex; flex-direction:column; }
+        .cb-fund-head { background:${NAVY}; color:#fff; padding:12px 16px; }
+        .cb-fund-name { font-family:'Fraunces',serif; font-weight:600; font-size:14.5px; }
+        .cb-fund-head .cb-isin { color:#C9D3E2; margin-top:2px; }
+        .cb-fund-block { padding:12px 16px 0; }
+        .cb-fund-block-title { text-transform:uppercase; letter-spacing:.08em; font-size:10px; color:${GOLD}; font-weight:700; margin:0 0 6px; }
+        .cb-ranked { margin:0 0 6px; padding-left:18px; font-size:12.5px; line-height:1.5; }
+        .cb-ranked-compact { columns:1; max-height:180px; overflow:auto; }
+        .cb-fund-note { font-size:12px; color:${INK_SOFT}; margin:0 0 8px; line-height:1.5; }
+        .cb-fund-foot { padding:10px 16px 14px; font-size:12px; color:${INK_SOFT}; border-top:1px solid ${LINE}; margin-top:auto; }
+
+        .cb-matrix-grid { display:flex; flex-direction:column; gap:20px; }
+        .cb-matrix-card { border:1px solid ${LINE}; border-radius:10px; padding:14px; background:${PAPER}; }
+        .cb-heat-table th { position:static; background:${PAPER}; font-size:11px; }
+        .cb-heat-label { font-weight:600; font-size:12px; color:${NAVY_DEEP}; white-space:nowrap; }
+        .cb-heat { text-align:center; font-size:12px; border-radius:4px; }
+        .cb-heat-empty { text-align:center; color:${INK_SOFT}; font-size:12px; }
+
+        .cb-callout { background:${BEIGE}; border-left:3px solid ${GOLD}; border-radius:0 10px 10px 0; padding:14px 18px; font-size:13px; line-height:1.6; }
+        .cb-callout p { margin:0 0 8px; } .cb-callout p:last-child { margin-bottom:0; }
+
+        .cb-compare-table th { min-width:170px; vertical-align:bottom; }
+        .cb-compare-corner { min-width:150px !important; background:${BEIGE}; z-index:3; }
+        .cb-compare-label { position:sticky; left:0; z-index:2; box-shadow:2px 0 4px rgba(0,0,0,0.04); font-weight:600; color:${INK_SOFT}; white-space:nowrap; background:${PAPER}; }
+        .cb-compare-fund-name { font-family:'Fraunces',serif; font-weight:600; font-size:13.5px; color:${NAVY_DEEP}; }
+        .cb-compare-table th .cb-isin { margin-top:2px; }
+        .cb-compare-band td { font-weight:700; text-transform:uppercase; letter-spacing:.07em; font-size:10.5px; color:${NAVY_DEEP}; padding:9px 14px; white-space:nowrap; }
+        .cb-compare-table td.cb-compare-note { white-space:normal; max-width:220px; font-size:12px; color:${INK_SOFT}; line-height:1.5; }
+        .cb-compare-wrap { max-height:640px; }
+
+        .cb-sector-select-row { display:flex; align-items:center; gap:10px; margin-bottom:20px; }
+        .cb-sector-select-label { font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:${INK_SOFT}; font-weight:600; }
+        .cb-sector-select { background:${PAPER}; border:1px solid ${LINE}; color:${NAVY_DEEP}; font-family:'Inter'; font-weight:600; font-size:14px; padding:9px 14px; border-radius:8px; cursor:pointer; }
+        .cb-sector-select:focus { outline:2px solid ${GOLD_LIGHT}; outline-offset:1px; }
+
+        .cb-image-gallery { display:flex; flex-direction:column; gap:20px; }
+        .cb-image-card { border:1px solid ${LINE}; border-radius:12px; overflow:hidden; background:${PAPER}; }
+        .cb-image-card img { width:100%; display:block; }
+        .cb-image-caption { margin:0; padding:8px 14px; font-size:11.5px; color:${INK_SOFT}; border-top:1px solid ${LINE}; background:${BEIGE}; }
+
+        .cb-pptx-box { border:1px solid ${LINE}; border-radius:10px; padding:16px 18px; background:${BEIGE}; margin-bottom:24px; }
+        .cb-pptx-box-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; }
+        .cb-pptx-download { display:inline-flex; align-items:center; gap:8px; color:${NAVY}; font-weight:600; text-decoration:none; font-size:13.5px; }
+        .cb-pptx-download:hover { text-decoration:underline; }
+        .cb-macro-hint { font-size:12.5px; color:${INK_SOFT}; line-height:1.6; margin:0 0 24px; padding:12px 16px; border-left:3px solid ${GOLD_LIGHT}; background:${PAPER}; border-radius:0 8px 8px 0; }
+
+        .cb-allocator-wrap { max-height:640px; }
+        .cb-allocator-table th { white-space:nowrap; text-align:center; }
+        .cb-allocator-group-head { background:${BEIGE}; color:${NAVY_DEEP}; font-weight:700; text-transform:uppercase; letter-spacing:.06em; font-size:11px; border-bottom:1px solid ${LINE}; }
+        .cb-allocator-name { font-weight:600; color:${NAVY_DEEP}; font-size:12.5px; white-space:nowrap; }
+        .cb-allocator-cell { text-align:center; white-space:nowrap; }
+        .cb-alloc-position { font-size:11.5px; color:${INK}; margin-bottom:4px; }
+        .cb-intent-badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:10.5px; font-weight:700; white-space:nowrap; }
+        .cb-intent-sur { background:#DCEFDE; color:#2F6B3F; }
+        .cb-intent-sp { background:#FBE7D3; color:#B5651D; }
+        .cb-intent-n { background:${LINE}; color:${INK_SOFT}; }
+        .cb-intent-retire { background:transparent; color:${INK_SOFT}; font-style:italic; font-weight:500; }
+        .cb-allocator-total { background:${BEIGE}; }
+        .cb-intent-tally { display:flex; gap:6px; font-size:10.5px; white-space:nowrap; }
+        .cb-intent-tally-sur { color:#2F6B3F; font-weight:700; }
+        .cb-intent-tally-sp { color:#B5651D; font-weight:700; }
+        .cb-intent-tally-n { color:${INK_SOFT}; font-weight:600; }
+        .cb-commodity-list { display:flex; flex-direction:column; gap:16px; }
+
+      `}</style>
+
+      <div className="cb-shell">
+        <header className="cb-header">
+          <div>
+            <p className="cb-eyebrow">Cabinet — Espace conseillers</p>
+            <h1>Le classeur</h1>
+          </div>
+        </header>
+
+        <nav className="cb-tabs">
+          {tabs.map((t) => (
+            <button key={t.key} className={`cb-tab ${activeTab === t.key ? 'active' : ''}`} onClick={() => setActiveTab(t.key)}>
+              <t.Icon size={16} /> {t.label}
+            </button>
+          ))}
+        </nav>
+
+        <main className="cb-panel">
+          {tabs.map((t) => (
+            <div key={t.key} style={{ display: activeTab === t.key ? 'block' : 'none' }}>
+              {t.key === 'macro' ? (
+                <MacroTab />
+              ) : t.key === 'comparaison' ? (
+                <ComparaisonSectorTab />
+              ) : (
+                <Workspace storageKey={`tab-data:${t.key}`} title={t.label} subtitle={t.subtitle} hint={t.hint} Icon={t.Icon} extractFn={t.extractFn} RenderComponent={t.RenderComponent} />
+              )}
+            </div>
+          ))}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
