@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "/outil_cabinet.html" }
+  ]
+}
